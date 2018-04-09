@@ -26,7 +26,7 @@ var (
 
 func buildConfigFromFlags(kubeconfigPath string) (*restclient.Config, error) {
 	if kubeconfigPath == "" {
-		glog.Warning("flag -kubeconfig was not specified. Using inClusterConfig.")
+		glog.Warning("flag -kubeconfig was not specified, using inClusterConfig")
 		kubeconfig, err := restclient.InClusterConfig()
 		if err == nil {
 			return kubeconfig, nil
@@ -97,13 +97,14 @@ func main() {
 		for {
 			err := tryToPullImage()
 			if err == nil {
+				// XXX(dmage): update is not atomic
 				pullImageCheck.problem.With(nil).Set(0)
+				pullImageCheck.timestamp.With(prometheus.Labels{"result": "success"}).SetToCurrentTime()
 			} else {
 				glog.Error(err)
 				pullImageCheck.problem.With(nil).Set(1)
+				pullImageCheck.timestamp.With(prometheus.Labels{"result": "failure"}).SetToCurrentTime()
 			}
-			// XXX(dmage): update is not atomic
-			pullImageCheck.timestamp.With(nil).SetToCurrentTime()
 			time.Sleep(30 * time.Second)
 		}
 	}()
