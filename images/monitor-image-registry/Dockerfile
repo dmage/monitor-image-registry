@@ -2,6 +2,7 @@ FROM openshift/origin-base
 
 COPY hello.c .
 COPY make-dir-image.sh .
+COPY default-policy.json /etc/containers/policy.json
 
 RUN INSTALL_PKGS="openshift-monitor-image-registry" && \
     yum --enablerepo=origin-local-release install -y ${INSTALL_PKGS} && \
@@ -12,7 +13,7 @@ RUN INSTALL_PKGS="openshift-monitor-image-registry" && \
     yum clean all
 
 LABEL io.k8s.display-name="OpenShift Container Platform Image Registry Monitor" \
-      io.k8s.description="This is a component of OpenShift Container Platform and provides a monitoring component."
+      io.k8s.description="This is a component of OpenShift Container Platform and provides a monitoring component." \
       io.openshift.tags="openshift,docker,registry"
 
 # doesn't require a root user.

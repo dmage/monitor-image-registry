@@ -233,9 +233,13 @@ func tryToPushImage() error {
 		return fmt.Errorf("unable to create new policy context: %v", err)
 	}
 
-	if err := copy.Image(policyContext, dstRef, srcRef, nil); err != nil {
+	if err := copy.Image(policyContext, dstRef, srcRef, &copy.Options{
+		SourceCtx:      systemContext,
+		DestinationCtx: systemContext,
+	}); err != nil {
 		return fmt.Errorf("unable to copy from dir:%s to docker:%s: %v", *pushImageDir, dstName, err)
 	}
+	glog.V(1).Infof("check succeed: was able to push image %s", dstRef.DockerReference())
 
 	return nil
 }
