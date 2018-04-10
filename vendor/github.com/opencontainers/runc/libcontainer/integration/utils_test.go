@@ -76,6 +76,17 @@ func newTestRoot() (string, error) {
 	return dir, nil
 }
 
+func newTestBundle() (string, error) {
+	dir, err := ioutil.TempDir("", "bundle")
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // newRootfs creates a new tmp directory and copies the busybox root filesystem
 func newRootfs() (string, error) {
 	dir, err := ioutil.TempDir("", "")
@@ -98,7 +109,7 @@ func remove(dir string) {
 // copyBusybox copies the rootfs for a busybox container created for the test image
 // into the new directory for the specific test
 func copyBusybox(dest string) error {
-	out, err := exec.Command("sh", "-c", fmt.Sprintf("cp -R /busybox/* %s/", dest)).CombinedOutput()
+	out, err := exec.Command("sh", "-c", fmt.Sprintf("cp -a /busybox/* %s/", dest)).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("copy error %q: %q", err, out)
 	}

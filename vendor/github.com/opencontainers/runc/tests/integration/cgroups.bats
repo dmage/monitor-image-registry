@@ -2,12 +2,10 @@
 
 load helpers
 
-TEST_CGROUP_NAME="runc-cgroups-integration-test"
-CGROUP_MEMORY="${CGROUP_BASE_PATH}/${TEST_CGROUP_NAME}"
-
 function teardown() {
-    rm -f $BATS_TMPDIR/runc-update-integration-test.json
+    rm -f $BATS_TMPDIR/runc-cgroups-integration-test.json
     teardown_running_container test_cgroups_kmem
+    teardown_running_container test_cgroups_permissions
     teardown_busybox
 }
 
@@ -28,9 +26,10 @@ function check_cgroup_value() {
 }
 
 @test "runc update --kernel-memory (initialized)" {
+    [[ "$ROOTLESS" -ne 0 ]] && requires rootless_cgroup
     requires cgroups_kmem
-    # Add cgroup path
-    sed -i 's/\("linux": {\)/\1\n    "cgroupsPath": "\/runc-cgroups-integration-test",/'  ${BUSYBOX_BUNDLE}/config.json
+
+    set_cgroups_path "$BUSYBOX_BUNDLE"
 
     # Set some initial known values
     DATA=$(cat <<-EOF
@@ -43,9 +42,8 @@ EOF
     sed -i "s/\(\"resources\": {\)/\1\n${DATA}/" ${BUSYBOX_BUNDLE}/config.json
 
     # run a detached busybox to work with
-    runc run -d --console /dev/pts/ptmx test_cgroups_kmem
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_kmem
     [ "$status" -eq 0 ]
-    wait_for_container 15 1 test_cgroups_kmem
 
     # update kernel memory limit
     runc update test_cgroups_kmem --kernel-memory 50331648
@@ -56,14 +54,14 @@ EOF
 }
 
 @test "runc update --kernel-memory (uninitialized)" {
+    [[ "$ROOTLESS" -ne 0 ]] && requires rootless_cgroup
     requires cgroups_kmem
-    # Add cgroup path
-    sed -i 's/\("linux": {\)/\1\n    "cgroupsPath": "\/runc-cgroups-integration-test",/'  ${BUSYBOX_BUNDLE}/config.json
+
+    set_cgroups_path "$BUSYBOX_BUNDLE"
 
     # run a detached busybox to work with
-    runc run -d --console /dev/pts/ptmx test_cgroups_kmem
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_kmem
     [ "$status" -eq 0 ]
-    wait_for_container 15 1 test_cgroups_kmem
 
     # update kernel memory limit
     runc update test_cgroups_kmem --kernel-memory 50331648
@@ -75,4 +73,55 @@ EOF
         [ "$status" -eq 0 ]
         check_cgroup_value $CGROUP_MEMORY "memory.kmem.limit_in_bytes" 50331648
     fi
+}
+
+@test "runc create (no limits + no cgrouppath + no permission) succeeds" {
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_permissions
+    [ "$status" -eq 0 ]
+}
+
+@test "runc create (rootless + no limits + cgrouppath + no permission) fails with permission error" {
+    requires rootless
+    requires rootless_no_cgroup
+
+    set_cgroups_path "$BUSYBOX_BUNDLE"
+
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_permissions
+    [ "$status" -eq 1 ]
+    [[ ${lines[1]} == *"permission denied"* ]]
+}
+
+@test "runc create (rootless + limits + no cgrouppath + no permission) fails with informative error" {
+    requires rootless
+    requires rootless_no_cgroup
+
+    set_resources_limit "$BUSYBOX_BUNDLE"
+
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_permissions
+    [ "$status" -eq 1 ]
+    [[ ${lines[1]} == *"cannot set limits on the pids cgroup, as the container has not joined it"* ]]
+}
+
+@test "runc create (limits + cgrouppath + permission on the cgroup dir) succeeds" {
+   [[ "$ROOTLESS" -ne 0 ]] && requires rootless_cgroup
+
+    set_cgroups_path "$BUSYBOX_BUNDLE"
+    set_resources_limit "$BUSYBOX_BUNDLE"
+
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_permissions
+    [ "$status" -eq 0 ]
+}
+
+@test "runc exec (limits + cgrouppath + permission on the cgroup dir) succeeds" {
+   [[ "$ROOTLESS" -ne 0 ]] && requires rootless_cgroup
+
+    set_cgroups_path "$BUSYBOX_BUNDLE"
+    set_resources_limit "$BUSYBOX_BUNDLE"
+
+    runc run -d --console-socket $CONSOLE_SOCKET test_cgroups_permissions
+    [ "$status" -eq 0 ]
+
+    runc exec test_cgroups_permissions echo "cgroups_exec"
+    [ "$status" -eq 0 ]
+    [[ ${lines[0]} == *"cgroups_exec"* ]]
 }

@@ -7,12 +7,15 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
+	"github.com/containerd/console"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/runc/libcontainer/utils"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestExecIn(t *testing.T) {
@@ -61,6 +64,9 @@ func TestExecIn(t *testing.T) {
 	if !strings.Contains(out, "cat") || !strings.Contains(out, "ps") {
 		t.Fatalf("unexpected running process, output %q", out)
 	}
+	if strings.Contains(out, "\r") {
+		t.Fatalf("unexpected carriage-return in output")
+	}
 }
 
 func TestExecInUsernsRlimit(t *testing.T) {
@@ -86,8 +92,8 @@ func testExecInRlimit(t *testing.T, userns bool) {
 
 	config := newTemplateConfig(rootfs)
 	if userns {
-		config.UidMappings = []configs.IDMap{{0, 0, 1000}}
-		config.GidMappings = []configs.IDMap{{0, 0, 1000}}
+		config.UidMappings = []configs.IDMap{{HostID: 0, ContainerID: 0, Size: 1000}}
+		config.GidMappings = []configs.IDMap{{HostID: 0, ContainerID: 0, Size: 1000}}
 		config.Namespaces = append(config.Namespaces, configs.Namespace{Type: configs.NEWUSER})
 	}
 
@@ -118,7 +124,7 @@ func testExecInRlimit(t *testing.T, userns bool) {
 		Stderr: buffers.Stderr,
 		Rlimits: []configs.Rlimit{
 			// increase process rlimit higher than container rlimit to test per-process limit
-			{Type: syscall.RLIMIT_NOFILE, Hard: 1026, Soft: 1026},
+			{Type: unix.RLIMIT_NOFILE, Hard: 1026, Soft: 1026},
 		},
 	}
 	err = container.Run(ps)
@@ -229,7 +235,7 @@ func TestExecInError(t *testing.T) {
 			Cwd:    "/",
 			Args:   []string{"unexistent"},
 			Env:    standardEnvironment,
-			Stdout: &out,
+			Stderr: &out,
 		}
 		err = container.Run(unexistent)
 		if err == nil {
@@ -276,14 +282,50 @@ func TestExecInTTY(t *testing.T) {
 		Args: []string{"ps"},
 		Env:  standardEnvironment,
 	}
-	console, err := ps.NewConsole(0, 0)
+	parent, child, err := utils.NewSockPair("console")
+	if err != nil {
+		ok(t, err)
+	}
+	defer parent.Close()
+	defer child.Close()
+	ps.ConsoleSocket = child
+	type cdata struct {
+		c   console.Console
+		err error
+	}
+	dc := make(chan *cdata, 1)
+	go func() {
+		f, err := utils.RecvFd(parent)
+		if err != nil {
+			dc <- &cdata{
+				err: err,
+			}
+			return
+		}
+		c, err := console.ConsoleFromFile(f)
+		if err != nil {
+			dc <- &cdata{
+				err: err,
+			}
+			return
+		}
+		console.ClearONLCR(c.Fd())
+		dc <- &cdata{
+			c: c,
+		}
+	}()
+	err = container.Run(ps)
+	ok(t, err)
+	data := <-dc
+	if data.err != nil {
+		ok(t, data.err)
+	}
+	console := data.c
 	copy := make(chan struct{})
 	go func() {
 		io.Copy(&stdout, console)
 		close(copy)
 	}()
-	ok(t, err)
-	err = container.Run(ps)
 	ok(t, err)
 	select {
 	case <-time.After(5 * time.Second):
@@ -296,8 +338,11 @@ func TestExecInTTY(t *testing.T) {
 	waitProcess(process, t)
 
 	out := stdout.String()
-	if !strings.Contains(out, "cat") || !strings.Contains(string(out), "ps") {
+	if !strings.Contains(out, "cat") || !strings.Contains(out, "ps") {
 		t.Fatalf("unexpected running process, output %q", out)
+	}
+	if strings.Contains(out, "\r") {
+		t.Fatalf("unexpected carriage-return in output")
 	}
 }
 
@@ -395,7 +440,13 @@ func TestExecinPassExtraFiles(t *testing.T) {
 
 	var stdout bytes.Buffer
 	pipeout1, pipein1, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	pipeout2, pipein2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	inprocess := &libcontainer.Process{
 		Cwd:        "/",
 		Args:       []string{"sh", "-c", "cd /proc/$$/fd; echo -n *; echo -n 1 >3; echo -n 2 >4"},
@@ -497,8 +548,8 @@ func TestExecInUserns(t *testing.T) {
 	ok(t, err)
 	defer remove(rootfs)
 	config := newTemplateConfig(rootfs)
-	config.UidMappings = []configs.IDMap{{0, 0, 1000}}
-	config.GidMappings = []configs.IDMap{{0, 0, 1000}}
+	config.UidMappings = []configs.IDMap{{HostID: 0, ContainerID: 0, Size: 1000}}
+	config.GidMappings = []configs.IDMap{{HostID: 0, ContainerID: 0, Size: 1000}}
 	config.Namespaces = append(config.Namespaces, configs.Namespace{Type: configs.NEWUSER})
 	container, err := newContainer(config)
 	ok(t, err)

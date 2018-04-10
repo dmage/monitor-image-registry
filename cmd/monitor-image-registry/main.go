@@ -6,8 +6,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/containers/image/copy"
+	"github.com/containers/image/directory"
 	"github.com/containers/image/docker"
 	"github.com/containers/image/image"
+	"github.com/containers/image/signature"
 	"github.com/containers/image/types"
 	"github.com/golang/glog"
 	"github.com/opencontainers/go-digest"
@@ -21,7 +24,10 @@ var (
 	addr           = flag.String("listen", ":8080", "the address to listen on for HTTP requests")
 	kubeconfigPath = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
 	registry       = flag.String("registry", "docker-registry.default.svc.cluster.local:5000", "FIXME")
+	insecure       = flag.Bool("insecure", true, "FIXME") // FIXME: by default should be false
 	pullImage      = flag.String("pull-image", "openshift/httpd:latest", "FIXME")
+	pushImageDir   = flag.String("push-image-dir", "/usr/share/monitor-image-registry/dir-image", "FIXME")
+	pushImage      = flag.String("push-image", "smoketest/push-image:latest", "FIXME")
 )
 
 func buildConfigFromFlags(kubeconfigPath string) (*restclient.Config, error) {
@@ -44,40 +50,52 @@ func buildConfigFromFlags(kubeconfigPath string) (*restclient.Config, error) {
 
 const namespace = "monitor_image_registry"
 
-type check struct {
-	problem   *prometheus.GaugeVec
-	timestamp *prometheus.GaugeVec
-}
-
-func newCheck(name string) *check {
-	c := &check{
-		problem: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: namespace,
-				Subsystem: name,
-				Name:      "failed",
-				Help:      "The latency of various app creation steps.",
-			},
-			nil,
-		),
-		timestamp: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: namespace,
-				Subsystem: name,
-				Name:      "timestamp",
-				Help:      "The latency of various app creation steps.",
-			},
-			nil,
-		),
-	}
-	prometheus.MustRegister(c.problem)
-	prometheus.MustRegister(c.timestamp)
-	return c
-}
-
 var (
-	pullImageCheck = newCheck("pull_image")
+	problem = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "problem",
+			Help:      "The indicator of problems.",
+		},
+		[]string{"name"},
+	)
+	timestamp = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "timestamp",
+			Help:      "The timestamp when checks were performed for the last time.",
+		},
+		[]string{"name", "result"},
+	)
 )
+
+func init() {
+	prometheus.MustRegister(problem)
+	prometheus.MustRegister(timestamp)
+}
+
+const (
+	pullImageCheck = "pull_image"
+	pushImageCheck = "push_image"
+)
+
+type checkResult struct {
+	error
+}
+
+func (r checkResult) Float64() float64 {
+	if r.error != nil {
+		return 1
+	}
+	return 0
+}
+
+func (r checkResult) ResultLabel() string {
+	if r.error != nil {
+		return "failure"
+	}
+	return "success"
+}
 
 var kubeconfig *restclient.Config
 
@@ -96,15 +114,31 @@ func main() {
 	go func() {
 		for {
 			err := tryToPullImage()
-			if err == nil {
-				// XXX(dmage): update is not atomic
-				pullImageCheck.problem.With(nil).Set(0)
-				pullImageCheck.timestamp.With(prometheus.Labels{"result": "success"}).SetToCurrentTime()
-			} else {
-				glog.Error(err)
-				pullImageCheck.problem.With(nil).Set(1)
-				pullImageCheck.timestamp.With(prometheus.Labels{"result": "failure"}).SetToCurrentTime()
+			if err != nil {
+				glog.Errorf("pull image check failed: %v", err)
 			}
+
+			r := checkResult{error: err}
+			// XXX(dmage): update is not atomic
+			problem.With(prometheus.Labels{"name": pullImageCheck}).Set(r.Float64())
+			timestamp.With(prometheus.Labels{"name": pullImageCheck, "result": r.ResultLabel()}).SetToCurrentTime()
+
+			time.Sleep(30 * time.Second)
+		}
+	}()
+
+	go func() {
+		for {
+			err := tryToPushImage()
+			if err != nil {
+				glog.Errorf("push image check failed: %v", err)
+			}
+
+			r := checkResult{error: err}
+			// XXX(dmage): update is not atomic
+			problem.With(prometheus.Labels{"name": pushImageCheck}).Set(r.Float64())
+			timestamp.With(prometheus.Labels{"name": pushImageCheck, "result": r.ResultLabel()}).SetToCurrentTime()
+
 			time.Sleep(30 * time.Second)
 		}
 	}()
@@ -123,7 +157,7 @@ func tryToPullImage() error {
 	}
 
 	systemContext := &types.SystemContext{
-		DockerInsecureSkipTLSVerify: true,
+		DockerInsecureSkipTLSVerify: *insecure,
 		DockerAuthConfig: &types.DockerAuthConfig{
 			Username: "unused--monitor-image-registry",
 			Password: kubeconfig.BearerToken, // FIXME(dmage): it's empty when the cert-based authentication is used
@@ -165,6 +199,43 @@ func tryToPullImage() error {
 		}
 	}
 	glog.V(1).Infof("check succeed: was able to pull image %s", src.Reference().DockerReference())
+
+	return nil
+}
+
+func tryToPushImage() error {
+	srcRef, err := directory.NewReference(*pushImageDir)
+	if err != nil {
+		return fmt.Errorf("invalid source name dir:%s: %v", *pushImageDir, err)
+	}
+
+	dstName := fmt.Sprintf("//%s/%s", *registry, *pushImage)
+	dstRef, err := docker.ParseReference(dstName)
+	if err != nil {
+		return fmt.Errorf("invalid destination name docker:%s: %v", dstName, err)
+	}
+
+	systemContext := &types.SystemContext{
+		DockerInsecureSkipTLSVerify: *insecure,
+		DockerAuthConfig: &types.DockerAuthConfig{
+			Username: "unused--monitor-image-registry",
+			Password: kubeconfig.BearerToken, // FIXME(dmage): it's empty when the cert-based authentication is used
+		},
+	}
+
+	policy, err := signature.DefaultPolicy(systemContext)
+	if err != nil {
+		return fmt.Errorf("unable to get default policy: %v", err)
+	}
+
+	policyContext, err := signature.NewPolicyContext(policy)
+	if err != nil {
+		return fmt.Errorf("unable to create new policy context: %v", err)
+	}
+
+	if err := copy.Image(policyContext, dstRef, srcRef, nil); err != nil {
+		return fmt.Errorf("unable to copy from dir:%s to docker:%s: %v", *pushImageDir, dstName, err)
+	}
 
 	return nil
 }

@@ -6,8 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -60,6 +61,24 @@ func main() {
 	}
 	v = append(v, fmt.Sprintf("spec: %s", specs.Version))
 	app.Version = strings.Join(v, "\n")
+
+	root := "/run/runc"
+	if os.Geteuid() != 0 {
+		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if runtimeDir != "" {
+			root = runtimeDir + "/runc"
+			// According to the XDG specification, we need to set anything in
+			// XDG_RUNTIME_DIR to have a sticky bit if we don't want it to get
+			// auto-pruned.
+			if err := os.MkdirAll(root, 0700); err != nil {
+				fatal(err)
+			}
+			if err := os.Chmod(root, 0700|os.ModeSticky); err != nil {
+				fatal(err)
+			}
+		}
+	}
+
 	app.Flags = []cli.Flag{
 		cli.BoolFlag{
 			Name:  "debug",
@@ -77,7 +96,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "root",
-			Value: "/run/runc",
+			Value: root,
 			Usage: "root directory for storage of container state (this should be located in tmpfs)",
 		},
 		cli.StringFlag{
