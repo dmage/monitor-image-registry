@@ -1,6 +1,6 @@
 #!/bin/sh -eu
 
-OUTDIR="/usr/share/monitor-image-registry/dir-image"
+: ${OUTDIR:=/usr/share/monitor-image-registry/dir-image}
 
 mkdir -p "$OUTDIR"
 
@@ -22,7 +22,7 @@ printf '{"created":"%s","author":"","architecture":"amd64","os":"linux"' "$NOW" 
 printf ',"config":{"Cmd":["/hello"]}' >>./config.json
 printf ',"rootfs":{"diff_ids":["sha256:%s"],"type":"layers"}' "$LAYER" >>./config.json
 printf ',"history":[{"created":"%s","created_by":"/bin/true"}]}' "$NOW" >>./config.json
-CONFIG="$(sha256sum /config.json)"
+CONFIG="$(sha256sum ./config.json)"
 CONFIG="${CONFIG%% *}"
 mv ./config.json "$OUTDIR/$CONFIG"
 

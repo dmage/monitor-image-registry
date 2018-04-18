@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/containers/image/copy"
@@ -16,8 +17,11 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/prometheus/client_golang/prometheus"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+
+	imagev1 "github.com/openshift/client-go/image/clientset/versioned/typed/image/v1"
 )
 
 var (
@@ -239,6 +243,22 @@ func tryToPushImage() error {
 	}); err != nil {
 		return fmt.Errorf("unable to copy from dir:%s to docker:%s: %v", *pushImageDir, dstName, err)
 	}
+
+	imageClient, err := imagev1.NewForConfig(kubeconfig)
+	if err != nil {
+		return fmt.Errorf("unable to create image client: %v", err)
+	}
+
+	idx := strings.Index(*pushImage, "/")
+	if idx == -1 {
+		return fmt.Errorf("unable to get namespace from the destination name %q", *pushImage)
+	}
+	namespace, nameTag := (*pushImage)[:idx], (*pushImage)[idx+1:]
+
+	if err := imageClient.ImageStreamTags(namespace).Delete(nameTag, &metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("unable to delete image stream tag %s/%s: %v", namespace, nameTag, err)
+	}
+
 	glog.V(1).Infof("check succeed: was able to push image %s", dstRef.DockerReference())
 
 	return nil
